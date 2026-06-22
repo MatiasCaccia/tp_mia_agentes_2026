@@ -11,10 +11,11 @@ Los tests de conformidad en `tests/conformance/test_m1.py` y
 
 from __future__ import annotations
 
+import json
 from typing import Any, Callable
 
 from mia_agents.protocols import LLMClient
-from mia_agents.types import AgentResult, ToolSchema
+from mia_agents.types import AgentResult, AgentStep, ToolSchema
 
 
 class MyAgent:
@@ -48,8 +49,8 @@ class MyAgent:
         self._system = system_prompt
         self._max_iterations = max_iterations
         self._max_history_messages = max_history_messages
-        # TODO (M1): inicializa el estado interno para las herramientas registradas.
-        # TODO (M2): inicializa la estructura de historial conversacional.
+        self._tools: dict[str, Callable[..., str]] = {}
+        self._schemas: dict[str, ToolSchema] = {}
 
     def register_tool(
         self,
@@ -65,7 +66,8 @@ class MyAgent:
         El callable se invoca con kwargs que coinciden con la firma.
         Debe devolver una cadena.
         """
-        raise NotImplementedError("M1: implementa el registro de herramientas")
+        self._tools[schema.name] = tool
+        self._schemas[schema.name] = schema
 
     def run(self, user_message: str) -> AgentResult:
         """Ejecuta el bucle del agente hasta una respuesta final o hasta max_iterations.
@@ -91,7 +93,80 @@ class MyAgent:
         `LLMResponse` y exponlos en `AgentResult.input_tokens` /
         `AgentResult.output_tokens`.
         """
-        raise NotImplementedError("M1: implementa el bucle del agente")
+        messages: list[dict[str, Any]] = [{"role": "user", "content": user_message}]
+        tools = list(self._schemas.values()) if self._schemas else None
+        steps: list[AgentStep] = []
+
+        for _ in range(self._max_iterations):
+            response = self._llm.chat(
+                messages=messages,
+                tools=tools,
+                system=self._system,
+            )
+
+            if not response.tool_calls:
+                return AgentResult(
+                    answer=response.content or "",
+                    steps=steps,
+                )
+
+            messages.append({
+                "role": "assistant",
+                "content": response.content or "",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "function": {"name": tc.name, "arguments": tc.arguments},
+                    }
+                    for tc in response.tool_calls
+                ],
+            })
+
+            for tc in response.tool_calls:
+                if tc.name not in self._tools:
+                    steps.append(AgentStep(
+                        tool_name=tc.name,
+                        tool_input=tc.arguments,
+                        tool_output=None,
+                        error=f"Herramienta desconocida: {tc.name}",
+                    ))
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": f"Error: herramienta '{tc.name}' no encontrada.",
+                    })
+                    continue
+
+                try:
+                    kwargs = json.loads(tc.arguments) if tc.arguments else {}
+                    result = self._tools[tc.name](**kwargs)
+                    steps.append(AgentStep(
+                        tool_name=tc.name,
+                        tool_input=tc.arguments,
+                        tool_output=result,
+                    ))
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": result,
+                    })
+                except Exception as e:
+                    steps.append(AgentStep(
+                        tool_name=tc.name,
+                        tool_input=tc.arguments,
+                        tool_output=None,
+                        error=str(e),
+                    ))
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": f"Error: {e}",
+                    })
+
+        return AgentResult(
+            answer=response.content or "",
+            steps=steps,
+        )
 
     def structured_call(
         self,
