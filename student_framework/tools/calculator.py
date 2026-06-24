@@ -20,6 +20,12 @@ def calculator(
     operator: Annotated[str, Field(description="Operador aritmético: +, -, * o /")],
 ) -> str:
     """Calcula el resultado de una operación aritmética entre dos números."""
+    try:
+        left_operand = float(left_operand)
+        right_operand = float(right_operand)
+    except (ValueError, TypeError):
+        return "Error: los operandos deben ser numéricos."
+    operator = str(operator).strip()
     if operator not in _OPERATORS:
         return f"Error: operador '{operator}' no soportado. Usa +, -, * o /"
     if operator == "/" and right_operand == 0:

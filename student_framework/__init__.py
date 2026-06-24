@@ -37,6 +37,11 @@ def build_agent(config: dict[str, Any] | None = None) -> Agent:
     agent = MyAgent(**kwargs)
 
     from student_framework.tools.calculator import calculator, calculator_schema
+    from student_framework.tools.file_reader import file_reader, file_reader_schema
+    from student_framework.tools.document_parser import document_parser, document_parser_schema
+
     agent.register_tool(calculator, calculator_schema)
+    agent.register_tool(file_reader, file_reader_schema)
+    agent.register_tool(document_parser, document_parser_schema)
 
     return agent
