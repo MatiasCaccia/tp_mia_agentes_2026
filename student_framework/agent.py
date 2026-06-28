@@ -1,12 +1,23 @@
-"""Implementación de su agente.
+"""Implementación del agente.
 
-Completen `register_tool` y `run` para el Milestone 1.
-En el Milestone 2 amplíen `MyAgent` para que sea estatal y respete
-`max_history_messages`.
+Milestone 1 (conservado):
+  - register_tool: registra un callable junto a su ToolSchema.
+  - run: bucle ReAct — razonar, actuar con herramientas, observar resultado,
+    repetir hasta respuesta final o hasta max_iterations.
+  - Manejo de herramienta desconocida y errores de ejecución sin romper run.
+  - AgentStep por cada herramienta invocada.
 
-Los tests de conformidad en `tests/conformance/test_m1.py` y
-`test_m2.py` describen con precisión qué comportamientos deben funcionar
-— léanlos antes de empezar.
+Milestone 2 (nuevo):
+  - self._history: el historial de conversación persiste entre llamadas
+    sucesivas a run(). Cada turno ve el contexto de los anteriores.
+  - max_history_messages: ventana deslizante — el LLM recibe como máximo
+    esa cantidad de mensajes en cada llamada, sin importar cuántos haya
+    en el historial interno.
+  - Acumulación de tokens: input_tokens y output_tokens de cada respuesta
+    LLM se suman durante el run() y se exponen en AgentResult.
+  - structured_call: solicita al LLM una respuesta estructurada usando la
+    herramienta sintética final_result. Valida los argumentos con Pydantic
+    y reintenta con contexto de reparación si fallan.
 """
 
 from __future__ import annotations
@@ -16,6 +27,25 @@ from typing import Any, Callable
 
 from mia_agents.protocols import LLMClient
 from mia_agents.types import AgentResult, AgentStep, ToolSchema
+
+
+def _acumular_tokens(acumulado: int | None, nuevo: int | None) -> int | None:
+    """Suma los tokens de una nueva respuesta LLM al acumulado del run.
+
+    Regla (del contrato de AgentResult):
+    - Si ninguna respuesta reportó tokens todavía, devuelve None.
+    - En cuanto alguna respuesta reporta un valor no-None, los None
+      posteriores se tratan como 0 (la respuesta existió pero sin tokens).
+
+    Ejemplos:
+      _acumular_tokens(None, None)   → None   (nadie reportó nada)
+      _acumular_tokens(None, 100)    → 100    (primer reporte)
+      _acumular_tokens(100, None)    → 100    (None se suma como 0)
+      _acumular_tokens(100, 200)     → 300    (suma normal)
+    """
+    if acumulado is None and nuevo is None:
+        return None
+    return (acumulado or 0) + (nuevo or 0)
 
 
 class MyAgent:
@@ -33,17 +63,13 @@ class MyAgent:
         llm_client : LLMClient
             Cliente LLM (real o mock) que el agente utilizará.
         system_prompt : str
-            System prompt por defecto.
+            Prompt de sistema enviado al LLM en cada llamada.
         max_iterations : int
-            Tope de iteraciones del bucle del agente (M1).
+            Límite de iteraciones del bucle ReAct por cada run().
         max_history_messages : int
-            Número máximo de mensajes que se permiten en la lista
-            `messages` enviada al LLM en una única llamada. En M1 este
-            valor es ignorado; el agente sólo necesita aceptarlo en su
-            constructor. En M2 deben respetarlo: la longitud de la
-            lista de mensajes pasada a `self._llm.chat(...)` no puede
-            superar este número en ninguna llamada, sin importar la
-            estrategia de memoria que elijan.
+            Máximo de mensajes enviados al LLM en una sola llamada.
+            El historial interno puede ser más largo; este parámetro
+            controla cuánto ve el LLM (ventana deslizante).
         """
         self._llm = llm_client
         self._system = system_prompt
@@ -51,6 +77,9 @@ class MyAgent:
         self._max_history_messages = max_history_messages
         self._tools: dict[str, Callable[..., str]] = {}
         self._schemas: dict[str, ToolSchema] = {}
+        # Historial conversacional persistente entre llamadas a run().
+        # Crece con cada turno: user → assistant → tool → assistant → ...
+        self._history: list[dict[str, Any]] = []
 
     def register_tool(
         self,
@@ -59,58 +88,72 @@ class MyAgent:
     ) -> None:
         """Registra una herramienta callable junto a su esquema.
 
-        El esquema suele obtenerse con `ToolSchema.from_callable(fn)`. En
-        `run`, pasá `tools=list(self._schemas.values())`; el cliente LLM
-        aplica `to_llm_spec()` al llamar al proveedor.
-
-        El callable se invoca con kwargs que coinciden con la firma.
-        Debe devolver una cadena.
+        El esquema se pasa al LLM en cada run() para que sepa qué
+        herramientas puede invocar. El callable se ejecuta cuando el
+        LLM elige esa herramienta.
         """
         self._tools[schema.name] = tool
         self._schemas[schema.name] = schema
 
-    def run(self, user_message: str) -> AgentResult:
-        """Ejecuta el bucle del agente hasta una respuesta final o hasta max_iterations.
+    def _mensajes_para_llm(self) -> list[dict[str, Any]]:
+        """Aplica la ventana deslizante sobre el historial completo.
 
-        Comportamiento esperado (consulta tests/conformance/test_m1.py
-        para el contrato exacto del M1):
-          - Llama a `self._llm.chat(..., tools=list(self._schemas.values()))`.
-          - Si la respuesta contiene tool_calls, ejecuta cada uno y vuelca
-            los resultados en la siguiente llamada al chat.
-          - Si la respuesta solo contiene texto (sin `tool_calls`),
-            devuélvelo en `AgentResult.answer`. En M1 no uses la tool
-            sintética `final_result`; ese patrón es de M2 (ver README y
-            ENUNCIADO_M2.md).
-          - Limita el bucle a `self._max_iterations` y termina de forma
-            limpia cuando se alcance.
-          - Registra cada invocación de herramienta como un `AgentStep`
-            dentro de `result.steps`.
-
-        En el M2, además, llamadas sucesivas sobre la misma instancia
-        deben continuar la conversación, y la longitud de la lista de
-        mensajes enviada al LLM no debe superar `self._max_history_messages`.
-        Acumula los tokens de entrada/salida reportados por los
-        `LLMResponse` y exponlos en `AgentResult.input_tokens` /
-        `AgentResult.output_tokens`.
+        El historial interno puede crecer indefinidamente, pero el LLM
+        solo recibe los últimos max_history_messages mensajes. Esto
+        evita superar la ventana de contexto y mantiene el costo acotado.
         """
-        messages: list[dict[str, Any]] = [{"role": "user", "content": user_message}]
+        return self._history[-self._max_history_messages:]
+
+    def run(self, user_message: str) -> AgentResult:
+        """Ejecuta un turno de conversación.
+
+        El mensaje del usuario se añade al historial persistente. Cada
+        llamada al LLM usa la ventana deslizante del historial. Al
+        terminar, la respuesta del asistente también queda en el historial
+        para que el siguiente turno tenga contexto.
+
+        El bucle ReAct (M1) se conserva intacto:
+          1. Llamar al LLM con el historial limitado.
+          2. Si devuelve tool_calls: ejecutar, agregar al historial, repetir.
+          3. Si devuelve texto sin tool_calls: guardar y devolver.
+          4. Si se agota max_iterations: devolver lo acumulado.
+        """
+        # Agregar el mensaje del usuario al historial persistente
+        self._history.append({"role": "user", "content": user_message})
+
         tools = list(self._schemas.values()) if self._schemas else None
         steps: list[AgentStep] = []
+        total_input: int | None = None
+        total_output: int | None = None
+        response = None
 
         for _ in range(self._max_iterations):
+            # Enviar solo los últimos N mensajes al LLM
             response = self._llm.chat(
-                messages=messages,
+                messages=self._mensajes_para_llm(),
                 tools=tools,
                 system=self._system,
             )
 
+            # Acumular tokens de esta llamada al LLM
+            total_input = _acumular_tokens(total_input, response.input_tokens)
+            total_output = _acumular_tokens(total_output, response.output_tokens)
+
             if not response.tool_calls:
+                # El LLM respondió con texto: guardar en historial y terminar
+                self._history.append({
+                    "role": "assistant",
+                    "content": response.content or "",
+                })
                 return AgentResult(
                     answer=response.content or "",
                     steps=steps,
+                    input_tokens=total_input,
+                    output_tokens=total_output,
                 )
 
-            messages.append({
+            # El LLM pidió herramientas: guardar su mensaje en el historial
+            self._history.append({
                 "role": "assistant",
                 "content": response.content or "",
                 "tool_calls": [
@@ -122,6 +165,7 @@ class MyAgent:
                 ],
             })
 
+            # Ejecutar cada herramienta solicitada
             for tc in response.tool_calls:
                 if tc.name not in self._tools:
                     steps.append(AgentStep(
@@ -130,7 +174,7 @@ class MyAgent:
                         tool_output=None,
                         error=f"Herramienta desconocida: {tc.name}",
                     ))
-                    messages.append({
+                    self._history.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
                         "content": f"Error: herramienta '{tc.name}' no encontrada.",
@@ -145,7 +189,7 @@ class MyAgent:
                         tool_input=tc.arguments,
                         tool_output=result,
                     ))
-                    messages.append({
+                    self._history.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
                         "content": result,
@@ -157,15 +201,18 @@ class MyAgent:
                         tool_output=None,
                         error=str(e),
                     ))
-                    messages.append({
+                    self._history.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
                         "content": f"Error: {e}",
                     })
 
+        # Se agotaron las iteraciones: devolver lo que haya
         return AgentResult(
-            answer=response.content or "",
+            answer=response.content if response is not None else "",
             steps=steps,
+            input_tokens=total_input,
+            output_tokens=total_output,
         )
 
     def structured_call(
@@ -174,25 +221,92 @@ class MyAgent:
         schema: Any,
         max_repair_attempts: int = 2,
     ) -> Any:
-        """Pide al LLM una respuesta validada contra `schema` (M2).
+        """Solicita al LLM una respuesta estructurada validada contra schema.
 
-        Obligatorio: herramienta sintética `final_result` (ver
-        `mia_agents.final_result_tool_schema` / `FINAL_RESULT_TOOL_NAME`).
-        El agente ofrece esa tool al LLM, valida los `arguments` del
-        `tool_call` y reintenta con contexto de reparación si el modelo
-        responde con texto libre o con argumentos inválidos.
+        Implementación explícita del patrón de salida estructurada con
+        herramienta sintética y reparación iterativa:
 
-        Implementa esto en el M2:
-          - Pasa `tools=[final_result_tool_schema(schema)]` en cada
-            llamada a `chat` dentro de este método.
-          - Termina solo cuando llega un `tool_call` a `final_result`
-            cuyos argumentos validan con `schema.model_validate(...)`.
-          - Reintenta hasta `max_repair_attempts` incluyendo el fallo en
-            los mensajes (respuesta previa, mensaje `tool`, o user de
-            reparación).
-          - Si tras los reintentos sigue fallando, levanta una excepción
-            limpia (no devuelvas valores parciales ni `None` sin avisar).
+          1. Se crea el schema de la herramienta sintética final_result a
+             partir del modelo Pydantic recibido.
+          2. Se llama al LLM ofreciéndole solo esa herramienta. El LLM
+             debe invocarla para entregar su respuesta.
+          3. Si el LLM invoca final_result, se parsean y validan sus
+             argumentos con schema.model_validate(). Si son válidos,
+             se devuelve la instancia.
+          4. Si el LLM responde con texto libre o los argumentos no pasan
+             la validación, se agrega el error al contexto y se reintenta.
+          5. El número total de llamadas al LLM es 1 + max_repair_attempts.
+             Si se agotan, se levanta la última excepción capturada.
 
-        El M1 deja esto como stub; los tests de M2 verifican el contrato.
+        No modifica self._history — es un canal de comunicación separado
+        del historial conversacional principal.
         """
-        raise NotImplementedError("M2: implementa salida estructurada con reparación")
+        from mia_agents.tool_schema import FINAL_RESULT_TOOL_NAME, final_result_tool_schema
+
+        fr_schema = final_result_tool_schema(schema)
+        messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
+        ultimo_error: Exception | None = None
+
+        for _ in range(1 + max_repair_attempts):
+            response = self._llm.chat(
+                messages=messages,
+                tools=[fr_schema],
+                system=self._system,
+            )
+
+            # Buscar si el LLM invocó final_result en esta respuesta
+            fr_call = next(
+                (tc for tc in response.tool_calls if tc.name == FINAL_RESULT_TOOL_NAME),
+                None,
+            )
+
+            if fr_call is None:
+                # El LLM respondió con texto libre en lugar de invocar final_result.
+                # Agregar su respuesta al contexto y un mensaje de corrección.
+                ultimo_error = RuntimeError(
+                    f"El modelo no invocó '{FINAL_RESULT_TOOL_NAME}'. "
+                    f"Respuesta recibida: {response.content!r}"
+                )
+                messages.append({"role": "assistant", "content": response.content or ""})
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"Tu respuesta no es válida. Debes invocar la herramienta "
+                        f"'{FINAL_RESULT_TOOL_NAME}' para entregar tu respuesta estructurada. "
+                        "No respondas con texto libre."
+                    ),
+                })
+                continue
+
+            # El LLM invocó final_result: intentar parsear y validar los argumentos
+            try:
+                raw_args = json.loads(fr_call.arguments) if fr_call.arguments else {}
+                return schema.model_validate(raw_args)
+            except Exception as e:
+                # La validación falló: agregar el tool_call fallido y el error
+                # al contexto para que el LLM pueda corregir en el siguiente intento.
+                ultimo_error = e
+                messages.append({
+                    "role": "assistant",
+                    "content": response.content or "",
+                    "tool_calls": [{
+                        "id": fr_call.id,
+                        "function": {
+                            "name": fr_call.name,
+                            "arguments": fr_call.arguments,
+                        },
+                    }],
+                })
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": fr_call.id,
+                    "content": (
+                        f"Error de validación: {e}. "
+                        f"Corrige los argumentos y vuelve a invocar '{FINAL_RESULT_TOOL_NAME}'."
+                    ),
+                })
+
+        # Se agotaron todos los intentos sin éxito
+        if ultimo_error is not None:
+            raise ultimo_error
+        raise RuntimeError("structured_call agotó todos los intentos sin éxito.")
