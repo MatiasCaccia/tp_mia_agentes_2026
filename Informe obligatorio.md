@@ -18,9 +18,245 @@ El framework está dividido en dos capas:
 
 ## 2. Diagrama de arquitectura
 
-La siguiente sección contiene el prompt para generar el diagrama de cajas y flechas del sistema. Pegar el código en [https://mermaid.live](https://mermaid.live) o en cualquier editor que soporte Mermaid (VS Code, GitHub, Notion) para obtener el diagrama visual.
+Los diagramas se organizan en tres niveles:
 
-[INICIO IMAGEN]
+1. **Vista global** — las cuatro secciones del sistema y sus conexiones principales.
+2. **Diagramas por sección** — el interior de cada sección; las flechas hacia afuera indican explícitamente a qué sección conectan.
+3. **Diagrama completo detallado** — todos los componentes y flujos en un solo gráfico.
+
+> Pegar cualquier bloque de código Mermaid en [https://mermaid.live](https://mermaid.live) para obtener el diagrama visual.
+
+---
+
+### 2.1 Vista global
+
+Muestra las cuatro secciones del sistema y los flujos entre ellas. Sin detalle interno.
+
+
+```mermaid
+flowchart LR
+    classDef ext  fill:#f0f0f0,stroke:#888,color:#333
+    classDef sfw  fill:#dbeafe,stroke:#3b82f6,color:#1e3a5f
+    classDef mia  fill:#ede9fe,stroke:#7c3aed,color:#3b0764
+    classDef srv  fill:#e5e7eb,stroke:#6b7280,color:#111
+
+    U["Entorno\nCLI · Tests"]:::ext
+    SFW["student_framework\nbuild_agent · MyAgent · Herramientas"]:::sfw
+    MIA["mia_agents\nLLMClient · ToolSchema · Providers"]:::mia
+    EXT["Servicios LLM\nOllama · AWS Bedrock"]:::srv
+
+    U -->|"configura y ejecuta"| SFW
+    SFW -->|"AgentResult"| U
+    SFW <-->|"chat() / LLMResponse"| MIA
+    MIA <-->|"API calls"| EXT
+```
+
+
+---
+
+### 2.2 Sección 1 — Entorno de ejecución
+
+Muestra los dos puntos de entrada al sistema. Las flechas salientes indican a qué sección del sistema van a parar.
+
+
+```mermaid
+flowchart TB
+    classDef ext  fill:#f0f0f0,stroke:#888,color:#333
+    classDef out  fill:#e5e7eb,stroke:#6b7280,stroke-dasharray:5 5,color:#374151
+
+    subgraph ENTORNO["Entorno de ejecución"]
+        CLI["CLI\npython -m mia_agents.cli run --message '...'"]:::ext
+        TESTS["Tests de conformidad\npytest test_m1.py\n(inyecta MockLLMClient)"]:::ext
+    end
+
+    BA["→ build_agent(config)\n[student_framework]"]:::out
+    RUN["→ agent.run(mensaje)\n[MyAgent — Bucle ReAct]"]:::out
+    RES["← AgentResult (answer, steps)\n[MyAgent — Bucle ReAct]"]:::out
+
+    CLI   -->|"build_agent(config)"| BA
+    TESTS -->|"build_agent({llm_client: mock})"| BA
+    CLI   -->|"agent.run(mensaje)"| RUN
+    TESTS -->|"agent.run(mensaje)"| RUN
+    RES   --> CLI
+    RES   --> TESTS
+```
+
+
+---
+
+### 2.3 Sección 2 — Configuración del agente (`build_agent`)
+
+Muestra cómo `build_agent` construye y arma el agente. Las flechas salientes indican a dónde van las dependencias externas.
+
+
+```mermaid
+flowchart TB
+    classDef sfw  fill:#dbeafe,stroke:#3b82f6,color:#1e3a5f
+    classDef tool fill:#fef9c3,stroke:#ca8a04,color:#713f12
+    classDef out  fill:#e5e7eb,stroke:#6b7280,stroke-dasharray:5 5,color:#374151
+
+    subgraph BUILD["student_framework — build_agent()  (__init__.py)"]
+        BA["build_agent(config)\n──────────────────────────────\nconfig.get('llm_client')\n  o  LLMClient.from_env()\nMyAgent(**kwargs)"]:::sfw
+        REG["register_tool(tool, schema) × 3\n──────────────────────────────\n_tools[schema.name]   = callable\n_schemas[schema.name] = ToolSchema"]:::sfw
+        C["calculator\n(callable + schema)"]:::tool
+        F["read_text_file\n(callable + schema)"]:::tool
+        T["thermo_converter\n(callable + schema)"]:::tool
+    end
+
+    ENV["← Entorno (CLI / Tests)\n[Sección 1]"]:::out
+    LC["→ LLMClient.from_env()\n[mia_agents — Sección 5]"]:::out
+    MA["→ MyAgent configurado\n[Bucle ReAct — Sección 3]"]:::out
+
+    ENV -->|"config"| BA
+    BA  -->|"sin llm_client en config"| LC
+    C & F & T -->|"(fn, schema)"| REG
+    BA  --> REG
+    REG -->|"agente listo"| MA
+```
+
+
+---
+
+### 2.4 Sección 3 — Bucle ReAct (`MyAgent.run`)
+
+Muestra el ciclo interno de razonamiento y acción. Las flechas salientes indican a qué sección del sistema apuntan las llamadas externas.
+
+
+```mermaid
+flowchart TB
+    classDef agent fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef dec   fill:#fef08a,stroke:#ca8a04,color:#713f12
+    classDef out   fill:#e5e7eb,stroke:#6b7280,stroke-dasharray:5 5,color:#374151
+
+    subgraph REACT["MyAgent — run()  (agent.py)"]
+        MSG["messages = [{role:user, content:msg}]"]:::agent
+        LOOP["for _ in range(max_iterations)"]:::agent
+        CALL["llm.chat(messages,\ntools=list(_schemas.values()),\nsystem=_system)"]:::agent
+        CHK{"¿response\n.tool_calls?"}:::dec
+        DISP["Dispatcher\n─────────────────────\nkwargs = json.loads(tc.arguments)\nresult = _tools[tc.name](**kwargs)\nAgentStep registrado"]:::agent
+        TADD["messages.append\n{role:tool, content:result}"]:::agent
+        RET["return AgentResult\n(answer, steps)"]:::agent
+    end
+
+    ENV["← agent.run() / AgentResult\n[Entorno — Sección 1]"]:::out
+    LC["→ LLMClient.chat()\n[mia_agents — Sección 5]"]:::out
+    TOOLS["→ tool(**kwargs) / str\n[Herramientas — Sección 4]"]:::out
+
+    ENV  --> MSG
+    MSG  --> LOOP --> CALL
+    CALL <-->|"schemas · mensajes\nLLMResponse"| LC
+    CALL --> CHK
+    CHK  -->|"Sí"| DISP
+    DISP <-->|"kwargs / str"| TOOLS
+    DISP --> TADD --> LOOP
+    CHK  -->|"No"| RET
+    RET  --> ENV
+```
+
+
+---
+
+### 2.5 Sección 4 — Herramientas
+
+Muestra las tres herramientas registradas. La única conexión externa es el dispatcher de MyAgent, que las invoca y recibe su resultado.
+
+
+```mermaid
+flowchart LR
+    classDef tool fill:#fef9c3,stroke:#ca8a04,color:#713f12
+    classDef out  fill:#e5e7eb,stroke:#6b7280,stroke-dasharray:5 5,color:#374151
+
+    subgraph TOOLS["Herramientas — student_framework/tools/"]
+        CALC["calculator\n──────────────────────\nParámetros: left_op · right_op · op\nOps: +  −  ×  ÷\nSin eval(), sin librerías externas"]:::tool
+        READER["read_text_file\n──────────────────────\nParámetro: path (str)\nSolo texto plano UTF-8\nLímite: 100 KB  (Pathlib)"]:::tool
+        THERMO["thermo_converter\n──────────────────────\nParámetros: value · from_unit · to_unit\nCategorías: P · V · T · E · m · n · R\n50+ unidades · conversión lineal/no-lineal"]:::tool
+    end
+
+    DISP["← Dispatcher: tool(**kwargs)\n[MyAgent — Sección 3]"]:::out
+    RES["→ str resultado: role=tool\n[MyAgent — Sección 3]"]:::out
+
+    DISP -->|"calculator(**kwargs)"| CALC
+    DISP -->|"read_text_file(**kwargs)"| READER
+    DISP -->|"thermo_converter(**kwargs)"| THERMO
+    CALC   -->|"str"| RES
+    READER -->|"str"| RES
+    THERMO -->|"str"| RES
+```
+
+
+---
+
+### 2.6 Sección 5 — LLMClient y transformación de schemas
+
+Muestra cómo `LLMClient` convierte los `ToolSchema` al formato del proveedor activo. Las flechas salientes apuntan a los proveedores y al agente.
+
+
+```mermaid
+flowchart TB
+    classDef mia fill:#ede9fe,stroke:#7c3aed,color:#3b0764
+    classDef out fill:#e5e7eb,stroke:#6b7280,stroke-dasharray:5 5,color:#374151
+
+    subgraph MIALIB["mia_agents — LLMClient + ToolSchema"]
+        TS["ToolSchema.to_llm_spec()\n──────────────────────────────\nEntrada: ToolSchema(name, description, parameters)\nSalida:  {name, description, parameters (JSON Schema)}"]:::mia
+        LC["LLMClient.chat(messages, tools, system)\n──────────────────────────────\n① _tool_specs_as_dicts()\n   ToolSchema → dict plano (to_llm_spec)\n② _format_tools()\n   dict → formato nativo del proveedor\n③ Delegar al proveedor activo"]:::mia
+    end
+
+    MA["← MyAgent: chat(messages, tools=[ToolSchema...])\n[Bucle ReAct — Sección 3]"]:::out
+    OP["→ OllamaProvider\n[Sección 6]"]:::out
+    BP["→ BedrockProvider\n[Sección 6]"]:::out
+    RESP["→ LLMResponse (content, tool_calls, tokens)\n[MyAgent — Sección 3]"]:::out
+
+    MA -->|"tools=[ToolSchema...]\nmessages"| LC
+    LC  <-->|"to_llm_spec()"| TS
+    LC  -->|"OLLAMA_HOST activo"| OP
+    LC  -->|"BEDROCK_MODEL_ID activo"| BP
+    OP & BP -->|"LLMResponse normalizado"| RESP
+    RESP --> MA
+```
+
+
+---
+
+### 2.7 Sección 6 — Proveedores y servicios externos
+
+Muestra cómo cada proveedor formatea los schemas y se comunica con el servicio externo. La única conexión hacia afuera del sistema es aquí.
+
+
+```mermaid
+flowchart LR
+    classDef prov fill:#fce7f3,stroke:#db2777,color:#831843
+    classDef srv  fill:#f0f0f0,stroke:#888,color:#333
+    classDef out  fill:#e5e7eb,stroke:#6b7280,stroke-dasharray:5 5,color:#374151
+
+    subgraph PROVS["Proveedores + Servicios LLM externos"]
+        subgraph OP_BOX["OllamaProvider"]
+            OP["_wrap_tool_spec():\n{type: 'function',\n function: {name,\n  description,\n  parameters}}\n─────────────\noptions: temperature=0.2\n         num_ctx=16384"]:::prov
+            OL["Ollama\nllama3.1\nlocalhost:11434"]:::srv
+        end
+        subgraph BP_BOX["BedrockProvider"]
+            BP["_wrap_tool_spec():\n{toolSpec: {name,\n description,\n inputSchema:\n  {json: {...}}}}\n─────────────\nboto3 Converse API\ntoolConfig: {tools:[...]}"]:::prov
+            AWS["AWS Bedrock\namazon.nova-lite-v1:0\nus-east-1"]:::srv
+        end
+    end
+
+    LC["← LLMClient: delegar\n[mia_agents — Sección 5]"]:::out
+    LRESP["→ LLMResponse\n[LLMClient — Sección 5]"]:::out
+
+    LC  --> OP & BP
+    OP  -->|"ollama.Client.chat(**kwargs)"| OL
+    BP  -->|"boto3.converse(**kwargs)"| AWS
+    OL  -->|"ChatResponse\n(message, tool_calls,\nprompt_eval_count, eval_count)"| OP
+    AWS -->|"Converse response\n(output.message,\nusage.inputTokens/outputTokens)"| BP
+    OP & BP -->|"LLMResponse normalizado"| LRESP
+```
+
+
+---
+
+### 2.8 Diagrama completo detallado
+
+Vista unificada con todos los componentes, atributos internos y flujos. Útil como referencia global del sistema completo.
+
 
 ```mermaid
 flowchart TB
@@ -48,8 +284,8 @@ flowchart TB
         subgraph MYAGENT["🟩 MyAgent  (agent.py)"]
             direction TB
             INIT["__init__()\n─────────────────────\n_llm: LLMClient\n_tools: dict[str, Callable]\n_schemas: dict[str, ToolSchema]\n_max_iterations: int\n_max_history_messages: int"]:::agent
-            REG["register_tool(tool, schema)\n─────────────────────\n_tools[schema.name] = tool\n_schemas[schema.name] = schema"]:::agent
-            RUN["run(user_message) → AgentResult\n─────────────────────\nmessages = [{role:user, content:msg}]\nfor _ in range(max_iterations):\n  response = llm.chat(messages, tools=schemas)\n  if not response.tool_calls → return\n  ejecutar herramientas → agregar role:tool\nreturn AgentResult"]:::agent
+            REG["register_tool(tool, schema)\n─────────────────────\n_tools[schema.name]  = callable\n_schemas[schema.name] = ToolSchema"]:::agent
+            RUN["run(user_message) → AgentResult\n─────────────────────\nmessages = [{role:user, content:msg}]\nfor _ in range(max_iterations):\n  response = llm.chat(messages,\n             tools=schemas)\n  if not response.tool_calls → return\n  ejecutar herramientas\n  agregar role:tool\nreturn AgentResult"]:::agent
             DISP["Dispatcher interno\n─────────────────────\nkwargs = json.loads(tc.arguments)\nresult = _tools[tc.name](**kwargs)\nAgentStep registrado"]:::agent
         end
 
@@ -65,13 +301,13 @@ flowchart TB
     subgraph MIA["🟣 mia_agents  (librería de la cátedra)"]
         direction TB
 
-        TS["ToolSchema\n─────────────────────\nname: str\ndescription: str\nparameters: dict (JSON Schema)\n─────────────────────\nfrom_callable(fn) → lee Annotated + docstring\nto_llm_spec() → {name, description, parameters}"]:::mia
+        TS["ToolSchema\n─────────────────────\nname: str\ndescription: str\nparameters: dict (JSON Schema)\n─────────────────────\nfrom_callable(fn)\n  → Annotated + docstring\nto_llm_spec()\n  → {name, description, parameters}"]:::mia
 
-        LC["LLMClient.chat(messages, tools, system)\n─────────────────────\n1. _tool_specs_as_dicts(): ToolSchema → dict\n2. _format_tools(): dict → formato del proveedor\n3. Delega al proveedor activo"]:::mia
+        LC["LLMClient.chat(messages, tools, system)\n─────────────────────\n① _tool_specs_as_dicts()\n   ToolSchema → dict plano\n② _format_tools()\n   dict → formato del proveedor\n③ Delegar al proveedor activo"]:::mia
 
         subgraph PROVS["Proveedores"]
             direction LR
-            OP["OllamaProvider\n──────────────\n_wrap_tool_spec():\n{type:function,\n function:{name,\n  description,\n  parameters}}\n──────────────\noptions: temperature\n         num_ctx=16384"]:::provider
+            OP["OllamaProvider\n──────────────\n_wrap_tool_spec():\n{type:function,\n function:{name,\n  description,\n  parameters}}\n──────────────\ntemperature=0.2\nnum_ctx=16384"]:::provider
             BP["BedrockProvider\n──────────────\n_wrap_tool_spec():\n{toolSpec:{name,\n description,\n inputSchema:\n  {json:{...}}}}\n──────────────\nboto3 Converse API\ntoolConfig"]:::provider
         end
     end
@@ -80,50 +316,47 @@ flowchart TB
     subgraph EXT["⬛ Servicios LLM externos"]
         direction LR
         OLLAMA["Ollama (local)\nllama3.1\nlocalhost:11434"]:::external
-        BEDROCK["AWS Bedrock\namazon.nova-lite\nus-east-1"]:::external
+        BEDROCK["AWS Bedrock\namazon.nova-lite-v1:0\nus-east-1"]:::external
     end
 
-    %% ── Flujo de CONFIGURACIÓN (build_agent) ─────────────
-    CLI  -->|"build_agent(config)"| BA
+    %% ── Flujo de CONFIGURACIÓN ───────────────────────────
+    CLI   -->|"build_agent(config)"| BA
     TESTS -->|"build_agent({llm_client: mock})"| BA
-    BA -->|"register_tool(calculator, schema)"| REG
-    BA -->|"register_tool(read_text_file, schema)"| REG
-    BA -->|"register_tool(thermo_converter, schema)"| REG
+    BA    -->|"register_tool(calculator, schema)"| REG
+    BA    -->|"register_tool(read_text_file, schema)"| REG
+    BA    -->|"register_tool(thermo_converter, schema)"| REG
 
-    %% ── Flujo de EJECUCIÓN (run) ─────────────────────────
-    CLI  -->|"agent.run(mensaje)"| RUN
+    %% ── Flujo de EJECUCIÓN ───────────────────────────────
+    CLI   -->|"agent.run(mensaje)"| RUN
     TESTS -->|"agent.run(mensaje)"| RUN
 
     RUN -->|"chat(messages,\ntools=list(_schemas.values()))"| LC
-    LC  -->|"ToolSchema.to_llm_spec()"| TS
-    TS  -.->|"dict normalizado"| LC
+    LC  <-->|"to_llm_spec()"| TS
 
     LC --> OP
     LC --> BP
     OP -->|"ollama.Client.chat(**kwargs)"| OLLAMA
     BP -->|"boto3.converse(**kwargs)"| BEDROCK
-    OLLAMA -->|"ChatResponse\n(content / tool_calls)"| OP
-    BEDROCK -->|"Converse response\n(output.message)"| BP
-    OP -->|"LLMResponse"| LC
-    BP -->|"LLMResponse"| LC
-    LC -->|"LLMResponse\n(content, tool_calls,\ninput_tokens, output_tokens)"| RUN
+    OLLAMA  -->|"ChatResponse\n(message, tool_calls,\nprompt_eval_count)"| OP
+    BEDROCK -->|"Converse response\n(output.message,\nusage.inputTokens)"| BP
+    OP & BP -->|"LLMResponse\n(content, tool_calls,\ninput_tokens, output_tokens)"| LC
+    LC  -->|"LLMResponse"| RUN
 
     %% ── Despacho de herramientas ─────────────────────────
-    RUN -->|"tc.name + tc.arguments (JSON)"| DISP
-    DISP -->|"calculator(left, right, op)"| CALC
-    DISP -->|"read_text_file(path)"| READER
-    DISP -->|"thermo_converter(value, from, to)"| THERMO
+    RUN  -->|"tc.name + tc.arguments (JSON)"| DISP
+    DISP -->|"calculator(**kwargs)"| CALC
+    DISP -->|"read_text_file(**kwargs)"| READER
+    DISP -->|"thermo_converter(**kwargs)"| THERMO
     CALC   -->|"str"| DISP
     READER -->|"str"| DISP
     THERMO -->|"str"| DISP
     DISP -->|"message {role:tool, content:str}"| RUN
 
     %% ── Resultado final ──────────────────────────────────
-    RUN -->|"AgentResult\n(answer, steps)"| CLI
-    RUN -->|"AgentResult\n(answer, steps)"| TESTS
+    RUN -->|"AgentResult (answer, steps)"| CLI
+    RUN -->|"AgentResult (answer, steps)"| TESTS
 ```
 
-[FIN IMAGEN]
 
 ---
 
@@ -342,7 +575,7 @@ agent.run("¿Cuánto es 15 * 7?")
 - **Calidad del tool calling**: llama3.1 (8B) es un modelo relativamente pequeño. Puede alucinar nombres de herramientas, emitir JSON malformado en los argumentos, o responder con texto libre cuando debería invocar una herramienta. El agente maneja estos casos sin romperse, pero el resultado puede no ser correcto.
 - **Velocidad de inferencia**: sin GPU, cada llamada al LLM puede tardar entre 5 y 30 segundos según el hardware. Conversaciones con múltiples tool calls se vuelven lentas.
 - **Ventana de contexto**: la ventana configurada es de 16 384 tokens. Conversaciones largas con salidas de herramientas extensas (e.g., archivos de texto grandes) pueden acercarse al límite y degradar la calidad de la respuesta.
-- **Idioma**: llama3.1 puede degradar su razonamiento cuando se le da un system prompt en español y mensajes en inglés (o viceversa). La calidad del tool calling puede variar según el idioma del prompt.
+- **Idioma**: llama3.1 puede degradar su razonamiento cuando se mezclan idiomas entre el system prompt y los mensajes del usuario. La calidad del tool calling puede variar según el idioma del prompt.
 
 ### 4.2 Limitaciones de la implementación actual (Milestone 1)
 
