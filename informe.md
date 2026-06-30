@@ -576,15 +576,12 @@ Produce:
 - **Velocidad de inferencia**: depende del hardware disponible (CPU/GPU). En máquinas sin GPU, cada llamada al LLM puede tardar varios segundos.
 - **Ventana de contexto**: aunque se configuran 16384 tokens, conversaciones muy largas con muchas invocaciones de herramientas podrían acercarse al límite.
 
-### 9.2 Evolución entre M1 y M2
+### 9.2 Limitaciones de la implementación actual
 
-Las siguientes capacidades se incorporaron progresivamente entre los dos milestones:
-
-- **Historial entre llamadas a `run()`**: en M1 cada llamada era independiente; el contexto de conversación no persistía. En M2 se incorporó `self._history`, una lista persistente que acumula todos los turnos de la conversación y permite al LLM responder con memoria de intercambios anteriores.
-- **`structured_call()`**: en M1 era un stub que lanzaba `NotImplementedError`. En M2 se implementó usando la herramienta sintética `final_result`, validación Pydantic y un bucle de reparación con reintentos.
-- **Herramientas obligatorias**: en M1 se completó el conjunto con calculadora, lector de archivos y herramienta libre de estadísticas de texto (ver sección 10).
-- **Conteo de tokens**: en M1 `input_tokens` y `output_tokens` quedaban como `None`. En M2 se acumulan los tokens de cada llamada al LLM y se exponen en `AgentResult`.
-- **Sin reintentos ante fallos transitorios**: si el proveedor LLM falla (timeout, error de red), el agente no reintenta automáticamente. Esta limitación permanece en M2.
+- **Sin historial entre llamadas a `run()`**: en M1, cada llamada es independiente. El agente no recuerda conversaciones anteriores (esto se implementa en M2).
+- **Sin `structured_call()`**: la salida estructurada con validación y reparación es un stub que lanza `NotImplementedError` (se implementa en M2).
+- **Sin conteo de tokens**: `input_tokens` y `output_tokens` en `AgentResult` quedan como `None` (se implementa en M2).
+- **Sin reintentos ante fallos transitorios**: si Ollama falla (timeout, error de red), el agente no reintenta la llamada.
 
 ### 9.3 Limitaciones del diseño de herramientas
 
@@ -594,9 +591,9 @@ Las siguientes capacidades se incorporaron progresivamente entre los dos milesto
 
 ---
 
-## 10. Actualización M1 — Herramientas completas
+## 10. Herramientas implementadas (M1 completo)
 
-### 10.1 Estado final del conjunto de herramientas
+### 10.1 Conjunto de herramientas
 
 Con esta actualización, el Milestone 1 cuenta con las tres herramientas obligatorias:
 
@@ -604,15 +601,11 @@ Con esta actualización, el Milestone 1 cuenta con las tres herramientas obligat
 |---|---|---|
 | `calculator` | `student_framework/tools/calculator.py` | Operaciones aritméticas: `+`, `-`, `*`, `/` |
 | `read_text_file` | `student_framework/tools/file_reader.py` | Lectura de archivos de texto plano (UTF-8) |
-| `text_stats` | `student_framework/tools/text_stats.py` | Estadísticas de texto: caracteres, palabras, líneas |
+| `thermo_converter` | `student_framework/tools/thermo_converter.py` | Conversor de unidades termodinámicas (presión, volumen, temperatura, energía, masa, sustancia, constante R) |
 
 Las tres se registran en `build_agent()` (`student_framework/__init__.py`).
 
-### 10.2 Sobre los operadores de la calculadora
-
-El ENUNCIADO_M1.md menciona `%` (módulo) entre los operadores soportados. Tras revisar el contexto del TP, se concluyó que se trata de una inconsistencia tipográfica: el alcance correcto es una calculadora aritmética básica con las cuatro operaciones estándar (`+`, `-`, `*`, `/`). El operador `/` (división) es el que corresponde a ese slot, y es imprescindible para casos de uso iterativos como el método de Herón de Alejandría. No se implementó `%` porque no es parte del alcance correcto, ningún test del M1 lo requiere y no se lo menciona en ningún otro lugar del enunciado.
-
-### 10.3 Lector de archivos (`read_text_file`)
+### 10.2 Lector de archivos (`read_text_file`)
 
 Esta herramienta implementa el patrón de E/S restringida pedido por la consigna. Su diseño:
 
@@ -623,15 +616,30 @@ Esta herramienta implementa el patrón de E/S restringida pedido por la consigna
 
 El valor pedagógico es directo: permite al agente observar información externa que no está en el prompt ni en el conocimiento del LLM, extendiendo su capacidad de razonamiento más allá del contexto recibido.
 
-### 10.4 Estadísticas de texto (`text_stats`, herramienta libre)
+### 10.3 Conversor de unidades termodinámicas (`thermo_converter`, herramienta libre)
 
-Se eligió `text_stats` como herramienta libre por tres razones:
+Se eligió `thermo_converter` como herramienta libre. Convierte entre unidades de la misma magnitud física, cubriendo las siete categorías relevantes en termodinámica:
 
-1. **Complementa al lector de archivos**: la secuencia `read_text_file` → `text_stats` es un caso de uso real y demostrable de encadenamiento de herramientas (el output de una tool es el input de la siguiente).
-2. **Demuestra una limitación concreta del LLM**: el LLM no puede contar palabras o caracteres con exactitud. Delegar esto a Python garantiza un resultado exacto y verificable, ilustrando exactamente por qué existen las herramientas.
-3. **Es simple y transparente**: la implementación es Python puro, sin dependencias, fácil de auditar y de explicar.
+| Categoría | Unidades soportadas |
+|---|---|
+| Presión | Pa, hPa, kPa, MPa, GPa, bar, mbar, atm, psi, mmHg, torr, inHg |
+| Volumen | m3, L, mL, cm3, dm3, ft3, in3, gal |
+| Temperatura | K, C (°C), F (°F), R (Rankine) |
+| Energía | J, kJ, MJ, cal, kcal, BTU, Wh, kWh, eV, erg |
+| Masa | kg, g, mg, ug, lb, oz, t |
+| Sustancia | mol, mmol, umol, nmol, kmol |
+| Constante R | J\_mol\_K, kJ\_mol\_K, cal\_mol\_K, kcal\_mol\_K, Latm\_mol\_K, Lbar\_mol\_K, m3Pa\_mol\_K, BTU\_lbmol\_R |
 
-### 10.5 Principio de diseño: sin frameworks externos
+**Decisiones de diseño:**
+
+1. **Conversión de temperatura no lineal**: K ↔ °C ↔ °F ↔ Rankine se manejan con funciones de conversión explícitas (a través de Kelvin como pivote), no con factores multiplicativos.
+2. **Constante de gas ideal R como categoría propia**: las unidades compuestas de R (J/(mol·K), L·atm/(mol·K), etc.) se tratan como una magnitud separada con sus propios factores de conversión derivados de R = 8.314 462 J/(mol·K). Esto permite al agente expresar R en el sistema de unidades que el problema requiera.
+3. **Detección de errores entre categorías**: si el LLM intenta convertir entre categorías distintas (e.g., `atm` → `J`), la herramienta devuelve un mensaje de error descriptivo en lugar de producir un resultado sin sentido.
+4. **Sin librerías externas**: la implementación usa solo Python puro (dicts, `match`, aritmética flotante), sin `pint` ni similares.
+
+**Motivación pedagógica**: el LLM puede confundir factores de conversión o no recordar valores exactos (e.g., 1 atm = 101 325 Pa). Delegar la conversión a Python garantiza exactitud y permite al agente resolver problemas de termodinámica (PV = nRT, ciclos de Carnot, entalpías) sin errores numéricos.
+
+### 10.4 Principio de diseño: sin frameworks externos
 
 No se utilizó ninguna librería de agentes (LangChain, CrewAI, AutoGen, LlamaIndex, Haystack ni similares). El objetivo de la materia es estudiar la implementación manual del ciclo ReAct:
 
@@ -644,207 +652,3 @@ LLM devuelve tool_call
 ```
 
 Este ciclo es visible línea por línea en `student_framework/agent.py`. Ocultarlo detrás de una librería eliminaría el valor de aprendizaje del TP.
-
----
-
-## 11. Milestone 2 — Memoria, historial y salida estructurada
-
-### 11.1 Objetivo del Milestone 2
-
-Extender el agente con tres capacidades nuevas sin romper ninguna de las funcionalidades de M1:
-
-1. **Statefulness**: el historial de conversación persiste entre llamadas sucesivas a `run()`.
-2. **Historial acotado**: el número de mensajes enviados al LLM en cada llamada tiene un tope configurable.
-3. **Salida estructurada**: `structured_call()` permite obtener del LLM respuestas validadas contra un schema Pydantic, con reparación automática si la respuesta no es válida.
-4. **Conteo de tokens**: los tokens de cada llamada al LLM se acumulan y se exponen en `AgentResult`.
-
-### 11.2 Cambios en `MyAgent`
-
-#### 11.2.1 Historial persistente (`self._history`)
-
-En M1, cada llamada a `run()` creaba una lista local `messages` que se descartaba al terminar:
-
-```python
-# M1 (sin memoria)
-def run(self, user_message):
-    messages = [{"role": "user", "content": user_message}]  # ← se pierde al salir
-    ...
-```
-
-En M2, esa lista se mueve a un atributo de instancia que sobrevive entre llamadas:
-
-```python
-# M2 (con memoria)
-def __init__(self, ...):
-    self._history: list[dict[str, Any]] = []  # ← persiste
-
-def run(self, user_message):
-    self._history.append({"role": "user", "content": user_message})
-    ...
-    self._history.append({"role": "assistant", "content": response.content})
-    # ahora el próximo run() ve todo este historial
-```
-
-**Consecuencia observable**: si se le pregunta al agente "¿cuánto es 3 + 5?" y luego "¿y el doble de eso?", en M2 el LLM recibe el turno anterior en el historial y puede responder "16" en lugar de no saber a qué se refiere "eso".
-
-#### 11.2.2 Ventana deslizante (`_mensajes_para_llm`)
-
-El historial interno puede crecer sin límite, pero enviar miles de mensajes al LLM aumentaría el costo y podría superar la ventana de contexto. El parámetro `max_history_messages` controla cuántos mensajes se envían en cada llamada:
-
-```python
-def _mensajes_para_llm(self) -> list[dict[str, Any]]:
-    return self._history[-self._max_history_messages:]
-```
-
-Python acepta índices negativos fuera de rango (`[-50:]` en una lista de 3 elementos devuelve los 3 elementos), por lo que no hace falta manejo especial cuando el historial es más corto que la ventana.
-
-**Diferencia importante**:
-
-| Aspecto | Historial interno (`self._history`) | Lo que ve el LLM |
-|---|---|---|
-| Tamaño | Crece con cada turno (sin límite) | ≤ `max_history_messages` mensajes |
-| Persistencia | Permanente mientras viva el agente | Solo la ventana actual |
-| Propósito | Registro completo | Contexto para el LLM |
-
-#### 11.2.3 Acumulación de tokens
-
-La función auxiliar `_acumular_tokens` maneja el caso especial donde el LLM no reporta tokens (devuelve `None`):
-
-| `acumulado` | `nuevo` | Resultado | Razón |
-|---|---|---|---|
-| `None` | `None` | `None` | Ninguna respuesta reportó tokens |
-| `None` | `100` | `100` | Primer reporte: inicializa el conteo |
-| `100` | `None` | `100` | LLM no reportó, pero ya hay historial: suma 0 |
-| `100` | `200` | `300` | Suma normal |
-
-La regla clave: una vez que alguna respuesta reportó tokens, los `None` posteriores se tratan como `0` (la respuesta existió pero el proveedor no informó tokens).
-
-### 11.3 `structured_call` — Salida estructurada con reparación
-
-#### 11.3.1 El problema
-
-Obtener del LLM una respuesta en formato JSON estricto no es trivial: el LLM puede responder con texto libre, puede generar JSON malformado, o puede generar JSON que no cumple el schema. `structured_call` resuelve esto usando una herramienta sintética.
-
-#### 11.3.2 La herramienta sintética `final_result`
-
-La función `final_result_tool_schema(schema)` (provista por la cátedra en `mia_agents/tool_schema.py`) crea un `ToolSchema` donde el schema de los parámetros es el JSON Schema del modelo Pydantic recibido. Al ofrecerle al LLM **solo** esa herramienta, se lo fuerza a invocarla para entregar su respuesta, en lugar de responder con texto libre.
-
-#### 11.3.3 El bucle de reparación
-
-```
-structured_call(prompt, Schema, max_repair_attempts=2)
-│
-├── Llamada 1: ofrecer solo final_result
-│   ├── ¿Invocó final_result? ¿Pasan los argumentos la validación?
-│   │   └── SI → return Schema.model_validate(args)  ← éxito
-│   └── NO → agregar error al contexto → continuar
-│
-├── Llamada 2 (reparación 1): re-llamar con el error en el historial
-│   ├── ¿OK ahora?
-│   │   └── SI → return Schema.model_validate(args)
-│   └── NO → agregar error → continuar
-│
-└── Llamada 3 (reparación 2): último intento
-    ├── ¿OK?
-    │   └── SI → return
-    └── NO → raise ultimo_error
-```
-
-Total de llamadas al LLM: `1 + max_repair_attempts = 3` (con el valor por defecto).
-
-**Contexto de reparación por tipo de error**:
-
-| Error | Qué se agrega al historial | Objetivo |
-|---|---|---|
-| El LLM respondió con texto libre (no invocó `final_result`) | Mensaje del asistente + mensaje de corrección al usuario | Instruir al LLM a usar la herramienta |
-| Los argumentos no pasan `model_validate()` | El tool_call fallido + mensaje role=tool con el error de validación | Dar al LLM el error exacto para que corrija |
-
-**Nota importante**: `structured_call` no modifica `self._history`. Es un canal de comunicación separado del historial conversacional principal. Su conversación interna (los mensajes de reparación) no se mezcla con el historial del agente.
-
-### 11.4 Descripción del diagrama de flujo de `structured_call`
-
-```
-Descripción del diagrama para su armado:
-
-[Inicio: structured_call(prompt, Schema, max_repair_attempts=2)]
-    |
-    v
-[Crear fr_schema = final_result_tool_schema(Schema)]
-[Crear messages = [{role: "user", content: prompt}]]
-[ultimo_error = None]
-[intentos = 0]
-    |
-    v
-<¿intentos <= max_repair_attempts?> --NO--> [raise ultimo_error]
-    |
-   SI
-    |
-    v
-[LLM.chat(messages, tools=[fr_schema])]
-    |
-    v
-[Buscar tool_call con name == "final_result"]
-    |
-    v
-<¿Encontrado?> --NO--> [ultimo_error = RuntimeError]
-    |                   [messages += assistant + corrección]
-   SI                   [intentos += 1]
-    |                   [volver al inicio del while]
-    v
-[raw_args = json.loads(tc.arguments)]
-[Schema.model_validate(raw_args)]
-    |
-    v
-<¿Válido?> --SI--> [return instancia]  ← FIN exitoso
-    |
-   NO
-    |
-    v
-[ultimo_error = ValidationError]
-[messages += assistant tool_call + error role=tool]
-[intentos += 1]
-[volver al inicio del while]
-```
-
-### 11.5 Tests de conformidad M2
-
-| Test | Qué verifica | Estado |
-|---|---|---|
-| `test_agent_is_stateful_across_runs` | La segunda llamada a `run()` envía al LLM los mensajes del turno anterior | PASA |
-| `test_bounded_history_growth` | Con `max_history_messages=2`, el LLM nunca recibe más de 2 mensajes aunque el historial sea más largo | PASA |
-| `test_structured_call_offers_final_result_tool` | `structured_call` pasa al LLM un tool con name `"final_result"` | PASA |
-| `test_structured_output_max_retries` | Con `max_repair_attempts=2`, el LLM se llama exactamente 3 veces antes de lanzar | PASA |
-| `test_structured_output_repairs_schema_validation_error` | Cuando los argumentos no pasan validación, se agrega el error al contexto y se reintenta | PASA |
-| `test_token_accounting` | `input_tokens` y `output_tokens` de `AgentResult` acumulan correctamente los tokens de cada llamada al LLM | PASA |
-| `test_token_accounting_treats_missing_values_as_zero_after_first_report` | Una vez iniciado el conteo, los `None` del LLM se tratan como 0 | PASA |
-
-**Resultado total M1 + M2: 12/12 tests pasan.**
-
-### 11.6 Alcance de la statefulness: instancia vs. proceso
-
-La CLI (`python -m mia_agents.cli run --message "..."`) crea una nueva instancia del agente en cada invocación. Por lo tanto, el historial conversacional se reinicia con cada comando: desde la perspectiva del LLM, cada ejecución es una conversación independiente.
-
-La statefulness de M2 solo se observa cuando se reutiliza la misma instancia del agente dentro de un mismo proceso. Eso ocurre, por ejemplo, en los tests de conformidad (donde el agente se instancia una sola vez y `run()` se llama varias veces) o en un script Python que mantenga la instancia en memoria.
-
-Ejemplo conceptual:
-
-```python
-from student_framework import build_agent
-
-agent = build_agent(config)
-agent.run("Mi nombre es Ana.")
-agent.run("¿Cómo me llamo?")
-```
-
-En ese caso, la segunda llamada conserva el historial de la primera porque ambas comparten la misma instancia. La respuesta del LLM puede referirse al turno anterior porque lo recibe en el contexto enviado.
-
-Para demostrar este comportamiento con el modelo real (Ollama) se puede escribir un script en `scripts/` que instancie el agente una sola vez y llame a `run()` en secuencia dentro del mismo proceso.
-
-### 11.7 Principio de diseño: sin frameworks externos (M2)
-
-Al igual que en M1, la totalidad de M2 se implementó en Python puro sobre el scaffold de la cátedra:
-
-- La statefulness es una lista `self._history` — sin librerías de memoria externas.
-- La ventana deslizante es un slice de Python (`[-N:]`) — sin vectorstores ni bases de datos.
-- `structured_call` es un bucle `for` con Pydantic — sin `instructor`, `outlines` ni similares.
-- La acumulación de tokens es una función de 4 líneas — sin observabilidad externa.
