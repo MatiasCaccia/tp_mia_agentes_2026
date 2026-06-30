@@ -39,4 +39,10 @@ def build_agent(config: dict[str, Any] | None = None) -> Agent:
     from student_framework.tools.calculator import calculator, calculator_schema
     agent.register_tool(calculator, calculator_schema)
 
+    from student_framework.tools.file_reader import read_text_file, read_text_file_schema
+    agent.register_tool(read_text_file, read_text_file_schema)
+
+    from student_framework.tools.thermo_converter import thermo_converter, thermo_converter_schema
+    agent.register_tool(thermo_converter, thermo_converter_schema)
+
     return agent

@@ -580,7 +580,6 @@ Produce:
 
 - **Sin historial entre llamadas a `run()`**: en M1, cada llamada es independiente. El agente no recuerda conversaciones anteriores (esto se implementa en M2).
 - **Sin `structured_call()`**: la salida estructurada con validación y reparación es un stub que lanza `NotImplementedError` (se implementa en M2).
-- **Herramientas faltantes**: solo se implementó la calculadora. Faltan el lector de archivos y la herramienta libre.
 - **Sin conteo de tokens**: `input_tokens` y `output_tokens` en `AgentResult` quedan como `None` (se implementa en M2).
 - **Sin reintentos ante fallos transitorios**: si Ollama falla (timeout, error de red), el agente no reintenta la llamada.
 
@@ -589,3 +588,67 @@ Produce:
 - Las herramientas solo pueden devolver `str`. No hay soporte para tipos complejos, binarios o streaming.
 - No hay mecanismo de autorización: cualquier herramienta registrada está disponible para el LLM en todas las llamadas.
 - El LLM decide cuándo y cómo invocar una herramienta. Si el modelo no entiende bien la descripción del schema, puede no usarla o usarla incorrectamente.
+
+---
+
+## 10. Herramientas implementadas (M1 completo)
+
+### 10.1 Conjunto de herramientas
+
+Con esta actualización, el Milestone 1 cuenta con las tres herramientas obligatorias:
+
+| Herramienta | Archivo | Descripción |
+|---|---|---|
+| `calculator` | `student_framework/tools/calculator.py` | Operaciones aritméticas: `+`, `-`, `*`, `/` |
+| `read_text_file` | `student_framework/tools/file_reader.py` | Lectura de archivos de texto plano (UTF-8) |
+| `thermo_converter` | `student_framework/tools/thermo_converter.py` | Conversor de unidades termodinámicas (presión, volumen, temperatura, energía, masa, sustancia, constante R) |
+
+Las tres se registran en `build_agent()` (`student_framework/__init__.py`).
+
+### 10.2 Lector de archivos (`read_text_file`)
+
+Esta herramienta implementa el patrón de E/S restringida pedido por la consigna. Su diseño:
+
+- Solo acepta archivos de texto plano con codificación UTF-8.
+- Limita el tamaño a 100 KB para no exceder la ventana de contexto del LLM.
+- Maneja explícitamente todos los errores posibles (archivo inexistente, directorio, binario, sin permisos) devolviendo mensajes descriptivos como `str` en lugar de lanzar excepciones.
+- No utiliza librerías externas: solo `pathlib` de la biblioteca estándar de Python.
+
+El valor pedagógico es directo: permite al agente observar información externa que no está en el prompt ni en el conocimiento del LLM, extendiendo su capacidad de razonamiento más allá del contexto recibido.
+
+### 10.3 Conversor de unidades termodinámicas (`thermo_converter`, herramienta libre)
+
+Se eligió `thermo_converter` como herramienta libre. Convierte entre unidades de la misma magnitud física, cubriendo las siete categorías relevantes en termodinámica:
+
+| Categoría | Unidades soportadas |
+|---|---|
+| Presión | Pa, hPa, kPa, MPa, GPa, bar, mbar, atm, psi, mmHg, torr, inHg |
+| Volumen | m3, L, mL, cm3, dm3, ft3, in3, gal |
+| Temperatura | K, C (°C), F (°F), R (Rankine) |
+| Energía | J, kJ, MJ, cal, kcal, BTU, Wh, kWh, eV, erg |
+| Masa | kg, g, mg, ug, lb, oz, t |
+| Sustancia | mol, mmol, umol, nmol, kmol |
+| Constante R | J\_mol\_K, kJ\_mol\_K, cal\_mol\_K, kcal\_mol\_K, Latm\_mol\_K, Lbar\_mol\_K, m3Pa\_mol\_K, BTU\_lbmol\_R |
+
+**Decisiones de diseño:**
+
+1. **Conversión de temperatura no lineal**: K ↔ °C ↔ °F ↔ Rankine se manejan con funciones de conversión explícitas (a través de Kelvin como pivote), no con factores multiplicativos.
+2. **Constante de gas ideal R como categoría propia**: las unidades compuestas de R (J/(mol·K), L·atm/(mol·K), etc.) se tratan como una magnitud separada con sus propios factores de conversión derivados de R = 8.314 462 J/(mol·K). Esto permite al agente expresar R en el sistema de unidades que el problema requiera.
+3. **Detección de errores entre categorías**: si el LLM intenta convertir entre categorías distintas (e.g., `atm` → `J`), la herramienta devuelve un mensaje de error descriptivo en lugar de producir un resultado sin sentido.
+4. **Sin librerías externas**: la implementación usa solo Python puro (dicts, `match`, aritmética flotante), sin `pint` ni similares.
+
+**Motivación pedagógica**: el LLM puede confundir factores de conversión o no recordar valores exactos (e.g., 1 atm = 101 325 Pa). Delegar la conversión a Python garantiza exactitud y permite al agente resolver problemas de termodinámica (PV = nRT, ciclos de Carnot, entalpías) sin errores numéricos.
+
+### 10.4 Principio de diseño: sin frameworks externos
+
+No se utilizó ninguna librería de agentes (LangChain, CrewAI, AutoGen, LlamaIndex, Haystack ni similares). El objetivo de la materia es estudiar la implementación manual del ciclo ReAct:
+
+```
+LLM devuelve tool_call
+    → agente ejecuta callable
+    → resultado se agrega al historial como mensaje role=tool
+    → LLM vuelve a llamar con contexto actualizado
+    → repite hasta texto sin tool_calls
+```
+
+Este ciclo es visible línea por línea en `student_framework/agent.py`. Ocultarlo detrás de una librería eliminaría el valor de aprendizaje del TP.
