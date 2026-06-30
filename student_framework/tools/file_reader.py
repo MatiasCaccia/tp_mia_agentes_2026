@@ -4,9 +4,9 @@ Permite al agente acceder a información externa que no está en el prompt
 ni en el conocimiento interno del LLM. El agente recibe una ruta de
 archivo y devuelve el contenido como string para incorporarlo al contexto.
 
-Solo acepta archivos de texto (UTF-8). No lee directorios ni archivos
-binarios. Es la única forma en que el agente puede observar el sistema
-de archivos local.
+Solo acepta archivos de texto plano con codificación UTF-8. No lee
+directorios ni archivos binarios. Es la única forma en que el agente
+puede observar el sistema de archivos local.
 """
 
 from __future__ import annotations
@@ -18,17 +18,47 @@ from pydantic import Field
 
 from mia_agents.types import ToolSchema
 
-# Archivos más grandes probablemente excederían la ventana de contexto del LLM.
+# Umbral de tamaño máximo aceptado (100 KB). Archivos más grandes
+# probablemente excederían la ventana de contexto del LLM de todos modos,
+# y devolverlos enteros no aportaría valor al razonamiento del agente.
 _MAX_BYTES = 100_000
 
 
 def read_text_file(
-    path: Annotated[str, Field(description="Ruta al archivo de texto que se quiere leer.")],
+    path: Annotated[
+        str,
+        Field(description="Ruta al archivo de texto que se quiere leer (absoluta o relativa al CWD)."),
+    ],
 ) -> str:
     """Lee el contenido de un archivo de texto y lo devuelve como string.
 
-    Solo acepta archivos de texto plano con codificación UTF-8.
-    No lee directorios ni archivos binarios.
+    Solo acepta archivos de texto plano con codificación UTF-8. No lee
+    directorios ni archivos binarios. En cualquier condición de error
+    (archivo inexistente, demasiado grande, binario, sin permisos) devuelve
+    un mensaje descriptivo en lugar de lanzar una excepción, para que el
+    agente pueda informar el problema al usuario sin interrumpir su bucle.
+
+    Parameters
+    ----------
+    path : str
+        Ruta al archivo. Puede ser absoluta o relativa al directorio de
+        trabajo actual del proceso.
+
+    Returns
+    -------
+    str
+        Contenido completo del archivo, o un mensaje de error prefijado
+        con "Error:" si la lectura no fue posible.
+
+    Raises
+    ------
+    No lanza excepciones. Todos los errores se devuelven como strings.
+
+    Examples
+    --------
+    read_text_file("/etc/hostname")         → "mi-pc\\n"
+    read_text_file("/ruta/inexistente.txt") → "Error: el archivo '/ruta/inexistente.txt' no existe."
+    read_text_file("/imagen.png")           → "Error: el archivo '/imagen.png' no es texto plano en UTF-8."
     """
     file_path = Path(path)
 
